@@ -1,3 +1,6 @@
 https://bg-pro.streamlit.app/
 https://bg-removed.streamlit.app/
+https://bg-clear.streamlit.app/
 https://pdf-pro.streamlit.app/
+https://removebc.streamlit.app/
+https://change-bg.streamlit.app/
