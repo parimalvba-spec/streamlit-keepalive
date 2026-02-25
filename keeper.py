@@ -8,11 +8,12 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 # ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-SITES = [
-    "https://bg-pro.streamlit.app/",
-    "https://bg-removed.streamlit.app/",
-    "https://pdf-pro.streamlit.app/",
-]
+# Sites are loaded from sites.txt — just add/remove URLs there, no code change needed!
+def load_sites():
+    with open("sites.txt", "r") as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
+
+SITES = load_sites()
 
 PING_INTERVAL = 300
 WAKE_TIMEOUT  = 10_000
