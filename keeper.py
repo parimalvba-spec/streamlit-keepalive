@@ -1,6 +1,9 @@
 from playwright.sync_api import sync_playwright, Page
 import time
 import datetime
+import threading
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ─────────────────────────────────────────────
 #  CONFIG – add / remove your Streamlit URLs here
@@ -13,6 +16,26 @@ SITES = [
 
 PING_INTERVAL = 300   # seconds between activity pings (5 min)
 WAKE_TIMEOUT  = 10_000  # ms to wait for the wake button
+PORT = int(os.environ.get("PORT", 8080))  # Render sets PORT automatically
+
+
+# ─────────────────────────────────────────────
+#  Tiny web server so Render free tier doesn't kill the process
+# ─────────────────────────────────────────────
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Streamlit keeper is running!")
+
+    def log_message(self, format, *args):
+        pass  # suppress request logs
+
+
+def start_web_server():
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    log(f"Web server started on port {PORT}")
+    server.serve_forever()
 
 
 # ─────────────────────────────────────────────
@@ -44,7 +67,6 @@ def send_activity(page):
         pass
 
 
-# ─────────────────────────────────────────────
 def install_browser():
     """Ensure Chromium is installed at runtime (needed on Render)."""
     import subprocess
@@ -57,6 +79,10 @@ def install_browser():
 
 
 def main():
+    # Start web server in background thread (keeps Render free tier happy)
+    t = threading.Thread(target=start_web_server, daemon=True)
+    t.start()
+
     install_browser()
     log("Starting Streamlit keeper …")
 
@@ -86,14 +112,12 @@ def main():
 
             for url, page in pages:
                 try:
-                    # Reload to prevent Streamlit's 3-min idle disconnect
                     page.reload(timeout=60_000)
                     page.wait_for_load_state("networkidle", timeout=60_000)
                     wake_if_sleeping(page, url)
                     send_activity(page)
                     log(f"Pinged → {url}")
                 except Exception as e:
-                    # Try to recover by reopening the tab
                     log(f"Error on {url}: {e} — reopening …")
                     try:
                         page.goto(url, timeout=60_000)
