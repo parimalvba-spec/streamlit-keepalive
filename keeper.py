@@ -45,7 +45,19 @@ def send_activity(page):
 
 
 # ─────────────────────────────────────────────
+def install_browser():
+    """Ensure Chromium is installed at runtime (needed on Render)."""
+    import subprocess
+    log("Checking / installing Chromium …")
+    subprocess.run(
+        ["python", "-m", "playwright", "install", "chromium"],
+        check=True,
+    )
+    log("Chromium ready.")
+
+
 def main():
+    install_browser()
     log("Starting Streamlit keeper …")
 
     with sync_playwright() as p:
