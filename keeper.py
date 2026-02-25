@@ -6,21 +6,43 @@ import os
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ─────────────────────────────────────────────
+#  LOGGING
+# ─────────────────────────────────────────────
+def log(msg: str):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+def now_str():
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ─────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────
-def load_sites():
-    with open("sites.txt", "r") as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith("#")]
-
-SITES = load_sites()
-
-PING_INTERVAL = 300        # seconds between pings (5 min)
-WAKE_TIMEOUT  = 15_000     # ms to wait for wake button
-GOTO_TIMEOUT  = 120_000    # ms for page load (2 min — generous for slow apps)
-MAX_RETRIES   = 3          # retries before marking as error
+PING_INTERVAL = 300
+WAKE_TIMEOUT  = 15_000
+GOTO_TIMEOUT  = 120_000
+MAX_RETRIES   = 3
 PORT = int(os.environ.get("PORT", 8080))
 
 status = {}  # url -> {state, last_ping, retries}
+
+
+def load_sites():
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "sites.txt"),
+        os.path.join(os.getcwd(), "sites.txt"),
+        "/opt/render/project/src/sites.txt",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            log(f"Loading sites from: {path}")
+            with open(path, "r") as f:
+                sites = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            log(f"Loaded {len(sites)} sites: {sites}")
+            return sites
+    log("ERROR: sites.txt not found in any of: " + str(candidates))
+    return []
 
 
 # ─────────────────────────────────────────────
@@ -28,7 +50,7 @@ status = {}  # url -> {state, last_ping, retries}
 # ─────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now   = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(status)
         ok    = sum(1 for v in status.values() if "Running" in v.get("state","") or "Woken" in v.get("state",""))
         err   = sum(1 for v in status.values() if "Error" in v.get("state",""))
@@ -39,7 +61,7 @@ class Handler(BaseHTTPRequestHandler):
             last    = info.get("last_ping", "—")
             retries = info.get("retries", 0)
             color   = "#2ecc71" if ("Running" in state or "Woken" in state) else (
-                      "#f39c12" if "Loading" in state or "Retry" in state else "#e74c3c")
+                      "#f39c12" if ("Loading" in state or "Retry" in state) else "#e74c3c")
             retry_badge = f' <span style="color:#f39c12;font-size:11px">(retry {retries}/{MAX_RETRIES})</span>' if retries > 0 else ""
             rows += f"""
             <tr>
@@ -100,37 +122,38 @@ def start_web_server():
 
 
 # ─────────────────────────────────────────────
-def log(msg: str):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-
-def now_str():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
+#  Playwright helpers
+# ─────────────────────────────────────────────
 def wake_if_sleeping(page, url: str) -> str:
-    try:
-        page.wait_for_selector(
-            'button[data-testid="wakeup-button-viewer"]',
-            timeout=WAKE_TIMEOUT,
-        )
-        page.locator('button[data-testid="wakeup-button-viewer"]').click()
-        page.wait_for_load_state("networkidle", timeout=GOTO_TIMEOUT)
-        log(f"  ↑ Woke up → {url}")
-        return "😴 Woken Up"
-    except Exception:
-        log(f"  ✓ Running  → {url}")
-        return "✅ Running"
+    # Try multiple selectors for the wake button
+    selectors = [
+        'button[data-testid="wakeup-button-viewer"]',
+        'button:has-text("Yes, get this app back up!")',
+        'button:has-text("get this app back up")',
+        'button._restartButton_2xb9v_14',
+        'button[class*="restartButton"]',
+    ]
+    for selector in selectors:
+        try:
+            page.wait_for_selector(selector, timeout=5_000)
+            page.locator(selector).first.click()
+            log(f"  ↑ Clicked wake button ({selector}) → {url}")
+            page.wait_for_load_state("networkidle", timeout=GOTO_TIMEOUT)
+            log(f"  ↑ Woke up → {url}")
+            return "😴 Woken Up"
+        except Exception:
+            continue
+    log(f"  ✓ Running  → {url}")
+    return "✅ Running"
 
 
-def load_page(page, url: str):
-    """Load a page with retries."""
+def load_page_with_retry(page, url: str) -> bool:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             status[url]["retries"] = attempt - 1
             page.goto(url, timeout=GOTO_TIMEOUT)
-            page.wait_for_load_state("networkidle", timeout=GOTO_TIMEOUT)
+            # Use domcontentloaded — faster than networkidle for Streamlit apps
+            page.wait_for_load_state("domcontentloaded", timeout=GOTO_TIMEOUT)
             return True
         except Exception as e:
             log(f"  Attempt {attempt}/{MAX_RETRIES} failed for {url}: {e}")
@@ -157,12 +180,24 @@ def install_browser():
     log("Chromium ready.")
 
 
+# ─────────────────────────────────────────────
+#  Main
+# ─────────────────────────────────────────────
 def main():
     threading.Thread(target=start_web_server, daemon=True).start()
     install_browser()
-    log(f"Starting Streamlit keeper for {len(SITES)} sites …")
 
-    for url in SITES:
+    sites = load_sites()
+    if not sites:
+        log("No sites found! Check sites.txt exists in the repo.")
+        # Keep web server alive so we can see the error on dashboard
+        while True:
+            time.sleep(60)
+
+    log(f"Starting keeper for {len(sites)} sites …")
+
+    # Init status for all sites
+    for url in sites:
         status[url] = {"state": "⏳ Loading...", "last_ping": "—", "retries": 0}
 
     with sync_playwright() as p:
@@ -172,30 +207,26 @@ def main():
         )
 
         pages: list[tuple[str, Page]] = []
-        for url in SITES:
+        for url in sites:
             page = browser.new_page()
-            if load_page(page, url):
+            if load_page_with_retry(page, url):
                 state = wake_if_sleeping(page, url)
                 pages.append((url, page))
                 status[url] = {"state": state, "last_ping": now_str(), "retries": 0}
             else:
                 status[url] = {"state": "❌ Error", "last_ping": now_str(), "retries": MAX_RETRIES}
-                log(f"  ✗ Giving up on {url} — will retry next ping cycle")
+                log(f"  ✗ Giving up on {url}")
 
         log(f"\nAll sites processed. Pinging every {PING_INTERVAL // 60} min …\n")
 
         while True:
             time.sleep(PING_INTERVAL)
 
-            # Re-read sites.txt in case it changed
+            # Reload sites.txt every cycle (dynamic add/remove)
             current_sites = load_sites()
-
             for url in current_sites:
-                # Find existing page or open new one
-                page_entry = next((p for u, p in pages if u == url), None)
-
+                page_entry = next((pg for u, pg in pages if u == url), None)
                 if page_entry is None:
-                    # New site added to sites.txt
                     page_entry = browser.new_page()
                     status[url] = {"state": "⏳ Loading...", "last_ping": "—", "retries": 0}
 
@@ -205,10 +236,12 @@ def main():
                     state = wake_if_sleeping(page_entry, url)
                     send_activity(page_entry)
                     status[url] = {"state": state, "last_ping": now_str(), "retries": 0}
+                    if (url, page_entry) not in pages:
+                        pages.append((url, page_entry))
                     log(f"Pinged → {url}")
                 except Exception as e:
                     log(f"Error on {url}: {e} — retrying …")
-                    if load_page(page_entry, url):
+                    if load_page_with_retry(page_entry, url):
                         state = wake_if_sleeping(page_entry, url)
                         status[url] = {"state": state, "last_ping": now_str(), "retries": 0}
                         if (url, page_entry) not in pages:
